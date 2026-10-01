@@ -1,0 +1,20 @@
+{
+    "Url": "https://telemonitoreo.ejemplo.com",
+    "Titulo": "Telemonitoreo",
+    "RutaNavegador": "",
+    "ArgumentosNavegador": [
+        "--kiosk",
+        "{URL}",
+        "--edge-kiosk-type=fullscreen",
+        "--no-first-run"
+    ],
+    "UrlsVerificacion": [
+        "http://www.msftconnecttest.com/connecttest.txt",
+        "http://clients3.google.com/generate_204"
+    ],
+    "IntervaloVerificacionSeg": 5,
+    "TimeoutVerificacionSeg": 4,
+    "FallosParaSinConexion": 3,
+    "PaginaConfiguracionRed": "auto",
+    "ReabrirConfiguracionSeg": 60
+}
