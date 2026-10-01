@@ -42,7 +42,16 @@ if ($cuenta) {
             $sistema = "$raiz\Software\Microsoft\Windows\CurrentVersion\Policies\System"
             foreach ($v in 'DisableTaskMgr', 'DisableLockWorkstation', 'DisableChangePassword') { Remove-ValorRegistro $sistema $v }
             $explorer = "$raiz\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
-            foreach ($v in 'NoRun', 'NoWinKeys') { Remove-ValorRegistro $explorer $v }
+            foreach ($v in 'NoRun', 'NoWinKeys', 'SettingsPageVisibility') { Remove-ValorRegistro $explorer $v }
+
+            # Valores por defecto de Windows para los atajos de accesibilidad.
+            $accesibilidad = "$raiz\Control Panel\Accessibility"
+            Set-ValorRegistro "$accesibilidad\StickyKeys" 'Flags' '510'
+            Set-ValorRegistro "$accesibilidad\ToggleKeys" 'Flags' '62'
+            Set-ValorRegistro "$accesibilidad\Keyboard Response" 'Flags' '126'
+
+            $edge = "$raiz\Software\Policies\Microsoft\Edge"
+            if (Test-Path $edge) { Remove-Item $edge -Recurse -Force }
         }
     }
 

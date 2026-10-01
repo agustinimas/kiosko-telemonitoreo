@@ -6,6 +6,9 @@
     - Crea un usuario local estándar (sin permisos de administrador) para el kiosko.
     - Reemplaza el Escritorio de Windows SOLO para ese usuario por kiosko.ps1, que abre
       Microsoft Edge en modo kiosko y, si no hay internet, abre la configuración de red.
+      No se ven el menú Inicio, la barra de tareas ni el escritorio.
+    - Políticas de Edge para ese usuario: solo se puede navegar el sitio de telemonitoreo
+      (y sus páginas internas); cualquier otra dirección queda bloqueada.
     - Configura el inicio de sesión automático (contraseña guardada como secreto LSA,
       no en texto plano).
     - NO desactiva, desinstala ni agrega exclusiones al antivirus (Microsoft Defender
@@ -14,15 +17,17 @@
     Funciona en Windows 10 Pro, Enterprise y Education (no requiere Shell Launcher).
 
 .EXAMPLE
-    .\instalar-kiosko.ps1 -Url "https://telemonitoreo.ejemplo.com"
+    .\instalar-kiosko.ps1
 
 .EXAMPLE
-    .\instalar-kiosko.ps1 -Url "https://telemonitoreo.ejemplo.com" -Usuario kiosko -RestringirConfiguracion
+    .\instalar-kiosko.ps1 -SitiosPermitidos telemonitoreo.uy, otro-dominio-necesario.com
 #>
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
 param(
-    [Parameter(Mandatory)][string]$Url,
+    [string]$Url = 'https://www.telemonitoreo.uy',
+    # Dominios que se pueden navegar (incluye subdominios y todas sus páginas). Todo lo demás se bloquea.
+    [string[]]$SitiosPermitidos = @('telemonitoreo.uy'),
     [string]$Usuario = 'kiosko',
     [string]$NombreCompleto = 'Kiosko Telemonitoreo',
     [string]$Titulo = 'Telemonitoreo',
@@ -32,12 +37,15 @@ param(
     [switch]$SinInicioAutomatico,
     # Mantener la suspensión / apagado de pantalla configurados en el equipo.
     [switch]$PermitirSuspension,
-    # Dejar visibles solo las páginas de red en la app Configuración (afecta a TODOS los usuarios).
+    # Forzar también a nivel de equipo que la app Configuración muestre solo las páginas de red,
+    # para versiones de Windows 10 que no respetan la política por usuario (afecta a TODOS los usuarios).
     [switch]$RestringirConfiguracion
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'comun.ps1')
+
+$PaginasConfiguracionRed = 'showonly:network-status;network-wifi;network-ethernet;network-wifisettings;network-airplanemode;network-proxy;network-cellular'
 
 if ($Usuario -eq $env:USERNAME) {
     throw "El usuario del kiosko no puede ser el usuario actual ($env:USERNAME). Use otro nombre."
@@ -51,14 +59,16 @@ Show-EstadoAntivirus
 Write-Paso "Copiando archivos a $RutaInstalacion"
 # Program Files ya está protegido: el usuario kiosko solo puede leer, no modificar.
 New-Item -ItemType Directory -Force -Path $RutaInstalacion | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'kiosko.ps1') $RutaInstalacion -Force
+foreach ($archivo in 'kiosko.ps1', 'WifiNativo.cs') {
+    Copy-Item (Join-Path $PSScriptRoot $archivo) $RutaInstalacion -Force
+}
 
 $archivoConfig = Join-Path $RutaInstalacion 'config.json'
 $origenConfig = if (Test-Path $archivoConfig) { $archivoConfig } else { Join-Path $PSScriptRoot 'config.ejemplo.json' }
 $configuracion = Get-Content $origenConfig -Raw -Encoding UTF8 | ConvertFrom-Json
-$configuracion.Url = $Url
-$configuracion.Titulo = $Titulo
-$configuracion.RutaNavegador = $RutaNavegador
+$configuracion | Add-Member -NotePropertyName Url -NotePropertyValue $Url -Force
+$configuracion | Add-Member -NotePropertyName Titulo -NotePropertyValue $Titulo -Force
+$configuracion | Add-Member -NotePropertyName RutaNavegador -NotePropertyValue $RutaNavegador -Force
 $configuracion | ConvertTo-Json -Depth 5 | Set-Content -Path $archivoConfig -Encoding UTF8
 Write-Host "    Configuración: $archivoConfig"
 
@@ -119,11 +129,51 @@ Invoke-ConRegistroDeUsuario -Sid $sid -Accion {
     Set-ValorRegistro $sistema 'DisableLockWorkstation' 1 'DWord'
     Set-ValorRegistro $sistema 'DisableChangePassword' 1 'DWord'
 
-    # Por si se abre el Explorador temporalmente para elegir una red Wi-Fi.
     $explorer = "$raiz\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
     Set-ValorRegistro $explorer 'NoRun' 1 'DWord'
     Set-ValorRegistro $explorer 'NoWinKeys' 1 'DWord'
+    # En la app Configuración, solo las páginas de red (Windows 10 versiones recientes).
+    Set-ValorRegistro $explorer 'SettingsPageVisibility' $PaginasConfiguracionRed
+
+    # Sin atajos de accesibilidad (p. ej. Shift 5 veces) que abren otras ventanas.
+    $accesibilidad = "$raiz\Control Panel\Accessibility"
+    Set-ValorRegistro "$accesibilidad\StickyKeys" 'Flags' '506'
+    Set-ValorRegistro "$accesibilidad\ToggleKeys" 'Flags' '58'
+    Set-ValorRegistro "$accesibilidad\Keyboard Response" 'Flags' '122'
+
+    # Políticas de Edge solo para el usuario kiosko.
+    $politicas = "$raiz\Software\Policies"
+    $edge = "$politicas\Microsoft\Edge"
+    if (Test-Path $edge) { Remove-Item $edge -Recurse -Force }
+    Set-ValorRegistro "$edge\URLBlocklist" '1' '*'
+    $i = 1
+    foreach ($sitio in $SitiosPermitidos) { Set-ValorRegistro "$edge\URLAllowlist" ([string]$i) $sitio; $i++ }
+    Set-ValorRegistro "$edge\ExtensionInstallBlocklist" '1' '*'
+    Set-ValorRegistro $edge 'DeveloperToolsAvailability' 2 'DWord'   # sin herramientas de desarrollo
+    Set-ValorRegistro $edge 'BrowserAddProfileEnabled' 0 'DWord'
+    Set-ValorRegistro $edge 'BrowserGuestModeEnabled' 0 'DWord'
+    Set-ValorRegistro $edge 'HubsSidebarEnabled' 0 'DWord'           # sin barra lateral
+    Set-ValorRegistro $edge 'EdgeShoppingAssistantEnabled' 0 'DWord'
+    Set-ValorRegistro $edge 'PasswordManagerEnabled' 0 'DWord'
+    Set-ValorRegistro $edge 'AutofillCreditCardEnabled' 0 'DWord'
+
+    # Como en HKCU\Software\Policies estándar: el usuario solo puede leer sus políticas.
+    $acl = Get-Acl $politicas
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
+    $herencia = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit'
+    $propagacion = [System.Security.AccessControl.PropagationFlags]::None
+    foreach ($regla in @(
+            @('S-1-5-18', 'FullControl'),
+            @('S-1-5-32-544', 'FullControl'),
+            @($sid, 'ReadKey'))) {
+        $identidad = New-Object System.Security.Principal.SecurityIdentifier($regla[0])
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule(
+                    $identidad, $regla[1], $herencia, $propagacion, 'Allow')))
+    }
+    Set-Acl -Path $politicas -AclObject $acl
 }
+Write-Host "    Sitios permitidos en Edge: $($SitiosPermitidos -join ', ')" 
 Write-Host "    Shell: $comandoShell"
 
 # ----------------------------------------------------------------------------------------
@@ -137,8 +187,7 @@ Write-Host '    Políticas aplicadas (SmartScreen y demás protecciones de Edge 
 # ----------------------------------------------------------------------------------------
 if ($RestringirConfiguracion) {
     Write-Paso 'Restringiendo la app Configuración a las páginas de red'
-    Set-ValorRegistro $RutaPoliticasExplorerMaquina 'SettingsPageVisibility' `
-        'showonly:network-status;network-wifi;network-ethernet;network-wifisettings;network-airplanemode;network-proxy;network-cellular'
+    Set-ValorRegistro $RutaPoliticasExplorerMaquina 'SettingsPageVisibility' $PaginasConfiguracionRed
     Write-Host '    ATENCIÓN: esta restricción aplica a todos los usuarios del equipo.' -ForegroundColor Yellow
 }
 

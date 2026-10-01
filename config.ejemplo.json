@@ -1,5 +1,5 @@
 {
-    "Url": "https://telemonitoreo.ejemplo.com",
+    "Url": "https://www.telemonitoreo.uy",
     "Titulo": "Telemonitoreo",
     "RutaNavegador": "",
     "ArgumentosNavegador": [
@@ -15,6 +15,6 @@
     "IntervaloVerificacionSeg": 5,
     "TimeoutVerificacionSeg": 4,
     "FallosParaSinConexion": 3,
-    "PaginaConfiguracionRed": "auto",
-    "ReabrirConfiguracionSeg": 60
+    "AbrirConfiguracionWindows": "auto",
+    "PaginaConfiguracionRed": "ms-settings:network-status"
 }

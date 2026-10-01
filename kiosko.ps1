@@ -3,13 +3,16 @@
     Shell del modo kiosko de telemonitoreo.
 
 .DESCRIPTION
-    Se ejecuta en lugar del Escritorio de Windows (explorer.exe) para el usuario kiosko.
+    Se ejecuta en lugar del Escritorio de Windows (explorer.exe) para el usuario kiosko,
+    por lo que nunca se ven el menú Inicio, la barra de tareas ni el escritorio.
 
     - Abre Microsoft Edge en modo kiosko con la URL configurada y lo vuelve a abrir si se cierra.
+      Las políticas de Edge que aplica el instalador solo permiten navegar el sitio configurado.
     - Verifica la conexión a internet cada pocos segundos.
-    - Si no hay internet: cierra el navegador, muestra una pantalla de aviso y abre la
-      configuración de red de Windows. Cuando vuelve la conexión, cierra la configuración
-      y vuelve a abrir el navegador.
+    - Si no hay internet: cierra el navegador y muestra la pantalla de configuración de
+      internet del kiosko (lista de redes Wi-Fi para conectarse). Si el equipo no tiene
+      Wi-Fi, abre la configuración de red de Windows. Cuando vuelve la conexión, cierra
+      la configuración y vuelve a abrir el navegador.
     - No toca el antivirus ni ninguna otra configuración de seguridad del equipo.
 
     Registro de eventos: %LOCALAPPDATA%\Kiosko\kiosko.log (del usuario kiosko).
@@ -24,14 +27,16 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Net.Http
 
+$base = Split-Path -Parent $MyInvocation.MyCommand.Path
+Add-Type -Path (Join-Path $base 'WifiNativo.cs')
+
 # --------------------------------------------------------------------------------------
 # Configuración
 # --------------------------------------------------------------------------------------
-$base = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $RutaConfig) { $RutaConfig = Join-Path $base 'config.json' }
 
 $config = @{
-    Url                      = 'about:blank'
+    Url                      = 'https://www.telemonitoreo.uy'
     Titulo                   = 'Telemonitoreo'
     RutaNavegador            = ''
     ArgumentosNavegador      = @('--kiosk', '{URL}', '--edge-kiosk-type=fullscreen', '--no-first-run')
@@ -39,8 +44,8 @@ $config = @{
     IntervaloVerificacionSeg = 5
     TimeoutVerificacionSeg   = 4
     FallosParaSinConexion    = 3
-    PaginaConfiguracionRed   = 'auto'
-    ReabrirConfiguracionSeg  = 60
+    AbrirConfiguracionWindows = 'auto'
+    PaginaConfiguracionRed   = 'ms-settings:network-status'
 }
 if (Test-Path $RutaConfig) {
     $json = Get-Content -Path $RutaConfig -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -131,71 +136,29 @@ function Stop-Navegador {
 }
 
 # --------------------------------------------------------------------------------------
-# Configuración de red de Windows
+# Configuración de red
+# El Explorador de Windows nunca se inicia (mostraría el menú Inicio y la barra de
+# tareas). Para Wi-Fi se usa la lista propia del kiosko; la app Configuración de
+# Windows se abre en ventana sin menú Inicio.
 # --------------------------------------------------------------------------------------
-$script:ultimaAperturaConfig = [datetime]::MinValue
-$script:verificarConfigEn = $null   # momento para comprobar que la app Configuración abrió
-$script:mostrarRedesEn = $null      # momento para abrir la lista de redes Wi-Fi
-$script:explorerIniciado = $false
+$hayWifi = [WifiNativo]::HayAdaptador()
+Write-Log "Adaptador Wi-Fi: $hayWifi"
 
-function Test-AdaptadorWifi {
-    try {
-        return [bool](Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.NdisPhysicalMedium -eq 9 })
-    } catch {
-        return $false
-    }
-}
-
-function Test-ConfiguracionAbierta {
-    if (Get-ProcesoDeSesion 'SystemSettings') { return $true }
-    if ($script:explorerIniciado -and (Get-ProcesoDeSesion 'explorer')) { return $true }
-    return $false
-}
-
-function Open-ConfiguracionRed {
+function Open-ConfiguracionWindows {
     $pagina = [string]$config.PaginaConfiguracionRed
-    if (-not $pagina -or $pagina -eq 'auto') {
-        $pagina = if (Test-AdaptadorWifi) { 'ms-settings:network-wifi' } else { 'ms-settings:network-status' }
-    }
-    Write-Log "Abriendo configuración de red ($pagina)."
-    $script:ultimaAperturaConfig = Get-Date
+    if (-not $pagina.StartsWith('ms-settings:')) { $pagina = 'ms-settings:network-status' }
+    Write-Log "Abriendo configuración de red de Windows ($pagina)."
     try {
         Start-Process $pagina
-        $script:verificarConfigEn = (Get-Date).AddSeconds(10)
     } catch {
         Write-Log "No se pudo abrir $pagina : $_"
-        Open-ConexionesDeRedClasico
+        Show-Mensaje 'No se pudo abrir la configuración de internet de Windows.'
     }
 }
 
-# Alternativa si la app Configuración no abre: panel clásico "Conexiones de red".
-function Open-ConexionesDeRedClasico {
-    Write-Log 'Abriendo panel clásico de conexiones de red (ncpa.cpl).'
-    $script:explorerIniciado = $true
-    Start-Process -FilePath "$env:SystemRoot\System32\control.exe" -ArgumentList 'ncpa.cpl'
-}
-
-# La lista de redes Wi-Fi de Windows 10 es parte de la barra de tareas, que no existe en
-# el kiosko. Se inicia el Explorador solo mientras no hay conexión y se cierra al volver.
-function Show-RedesWifi {
-    if (-not (Get-ProcesoDeSesion 'explorer')) {
-        Write-Log 'Iniciando Explorador para mostrar redes Wi-Fi.'
-        $script:explorerIniciado = $true
-        Start-Process -FilePath "$env:SystemRoot\explorer.exe"
-        $script:mostrarRedesEn = (Get-Date).AddSeconds(5)
-    } else {
-        Start-Process 'ms-availablenetworks:'
-    }
-}
-
-function Close-ConfiguracionRed {
+function Close-ConfiguracionWindows {
     Get-ProcesoDeSesion 'SystemSettings' | Stop-Process -Force -ErrorAction SilentlyContinue
-    if ($script:explorerIniciado) {
-        Get-ProcesoDeSesion 'explorer' | Stop-Process -Force -ErrorAction SilentlyContinue
-        $script:explorerIniciado = $false
-    }
-    $script:verificarConfigEn = $null
-    $script:mostrarRedesEn = $null
+    Get-ProcesoDeSesion 'osk' | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 # --------------------------------------------------------------------------------------
@@ -241,10 +204,11 @@ function Get-ResultadoVerificacion {
 }
 
 # --------------------------------------------------------------------------------------
-# Pantalla de fondo del kiosko
+# Pantalla del kiosko
 # --------------------------------------------------------------------------------------
 $colorFondo = [System.Drawing.Color]::FromArgb(24, 32, 48)
 $colorBoton = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$colorSecundario = [System.Drawing.Color]::FromArgb(70, 80, 100)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $config.Titulo
@@ -265,66 +229,170 @@ function New-Etiqueta([float]$Tamano, [System.Drawing.FontStyle]$Estilo = 'Regul
     return $l
 }
 
-function New-Boton([string]$Texto, [System.Drawing.Color]$Color) {
+function New-Boton([string]$Texto, [System.Drawing.Color]$Color, [int]$Ancho = 540) {
     $b = New-Object System.Windows.Forms.Button
     $b.Text = $Texto
-    $b.Font = New-Object System.Drawing.Font('Segoe UI', 14)
+    $b.Font = New-Object System.Drawing.Font('Segoe UI', 13)
     $b.FlatStyle = 'Flat'
     $b.FlatAppearance.BorderSize = 0
     $b.BackColor = $Color
     $b.ForeColor = [System.Drawing.Color]::White
-    $b.Size = New-Object System.Drawing.Size(460, 56)
+    $b.Size = New-Object System.Drawing.Size($Ancho, 48)
     $b.Cursor = [System.Windows.Forms.Cursors]::Hand
     $form.Controls.Add($b)
     return $b
 }
 
-$lblTitulo = New-Etiqueta 32 'Bold'
+$lblTitulo = New-Etiqueta 28 'Bold'
 $lblTitulo.Text = $config.Titulo
-$lblEstado = New-Etiqueta 18
-$btnConfig = New-Boton 'Abrir configuración de internet' $colorBoton
-$btnWifi = New-Boton 'Ver redes Wi-Fi disponibles' $colorBoton
-$btnReintentar = New-Boton 'Reintentar ahora' ([System.Drawing.Color]::FromArgb(70, 80, 100))
-$btnApagar = New-Boton 'Apagar equipo' ([System.Drawing.Color]::FromArgb(150, 40, 40))
-$btnApagar.Size = New-Object System.Drawing.Size(220, 44)
+$lblEstado = New-Etiqueta 15
+
+# Lista de redes Wi-Fi
+$lblRedes = New-Etiqueta 12
+$lblRedes.Text = 'Redes Wi-Fi disponibles:'
+$lblRedes.TextAlign = 'BottomLeft'
+
+$lstRedes = New-Object System.Windows.Forms.ListBox
+$lstRedes.Font = New-Object System.Drawing.Font('Segoe UI', 14)
+$lstRedes.Size = New-Object System.Drawing.Size(540, 200)
+$lstRedes.IntegralHeight = $false
+$form.Controls.Add($lstRedes)
+
+$txtContrasena = New-Object System.Windows.Forms.TextBox
+$txtContrasena.Font = New-Object System.Drawing.Font('Segoe UI', 14)
+$txtContrasena.Size = New-Object System.Drawing.Size(540, 36)
+$txtContrasena.UseSystemPasswordChar = $true
+$form.Controls.Add($txtContrasena)
+$lblContrasena = New-Etiqueta 12
+$lblContrasena.Text = 'Contraseña de la red:'
+$lblContrasena.TextAlign = 'BottomLeft'
+
+$btnConectar = New-Boton 'Conectar' $colorBoton 265
+$btnTeclado = New-Boton 'Teclado en pantalla' $colorSecundario 265
+$btnConfig = New-Boton 'Más opciones de internet' $colorSecundario 265
+$btnReintentar = New-Boton 'Reintentar ahora' $colorSecundario 265
+$btnApagar = New-Boton 'Apagar equipo' ([System.Drawing.Color]::FromArgb(150, 40, 40)) 220
 $btnApagar.Font = New-Object System.Drawing.Font('Segoe UI', 11)
-$botonesSinConexion = @($btnConfig, $btnWifi, $btnReintentar)
+
+$controlesWifi = @($lblRedes, $lstRedes, $lblContrasena, $txtContrasena, $btnConectar, $btnTeclado)
+$controlesSinConexion = @($btnConfig, $btnReintentar)
 
 function Update-Disposicion {
     $ancho = $form.ClientSize.Width
     $alto = $form.ClientSize.Height
-    $y = [int]($alto * 0.22)
-    $lblTitulo.SetBounds(0, $y, $ancho, 70)
-    $lblEstado.SetBounds([int]($ancho * 0.1), $y + 90, [int]($ancho * 0.8), 120)
-    $y += 240
-    foreach ($b in $botonesSinConexion) {
-        $b.Location = New-Object System.Drawing.Point([int](($ancho - $b.Width) / 2), $y)
-        $y += $b.Height + 16
+    $x = [int](($ancho - 540) / 2)
+    $y = [int]($alto * 0.05)
+
+    $lblTitulo.SetBounds(0, $y, $ancho, 56); $y += 60
+    $lblEstado.SetBounds([int]($ancho * 0.1), $y, [int]($ancho * 0.8), 70); $y += 80
+
+    if ($lstRedes.Visible) {
+        $lblRedes.SetBounds($x, $y, 540, 26); $y += 28
+        $alturaLista = [Math]::Max(120, [Math]::Min(260, $alto - $y - 300))
+        $lstRedes.SetBounds($x, $y, 540, $alturaLista); $y += $alturaLista + 8
+        $lblContrasena.SetBounds($x, $y, 540, 26); $y += 28
+        $txtContrasena.Location = New-Object System.Drawing.Point($x, $y); $y += $txtContrasena.Height + 10
+        $btnConectar.Location = New-Object System.Drawing.Point($x, $y)
+        $btnTeclado.Location = New-Object System.Drawing.Point(($x + 275), $y); $y += 58
     }
-    $btnApagar.Location = New-Object System.Drawing.Point([int](($ancho - $btnApagar.Width) / 2), $alto - $btnApagar.Height - 40)
+    $btnConfig.Location = New-Object System.Drawing.Point($x, $y)
+    $btnReintentar.Location = New-Object System.Drawing.Point(($x + 275), $y)
+
+    $btnApagar.Location = New-Object System.Drawing.Point([int](($ancho - $btnApagar.Width) / 2), $alto - $btnApagar.Height - 30)
 }
+
+function Show-Mensaje([string]$Texto) { $lblEstado.Text = $Texto }
 
 function Show-Estado([string]$Estado) {
     switch ($Estado) {
-        'verificando' {
-            $lblEstado.Text = 'Verificando la conexión a internet...'
-        }
-        'cargando' {
-            $lblEstado.Text = 'Abriendo telemonitoreo...'
-        }
+        'verificando' { Show-Mensaje 'Verificando la conexión a internet...' }
+        'cargando' { Show-Mensaje 'Abriendo telemonitoreo...' }
         'sinconexion' {
-            $lblEstado.Text = "No hay conexión a internet.`nConéctese a una red Wi-Fi o por cable. Cuando vuelva la conexión, el telemonitoreo se abrirá solo."
+            if ($hayWifi) {
+                Show-Mensaje "No hay conexión a internet.`nElija una red Wi-Fi para conectarse. El telemonitoreo se abrirá solo al volver la conexión."
+            } else {
+                Show-Mensaje "No hay conexión a internet.`nRevise el cable de red. El telemonitoreo se abrirá solo al volver la conexión."
+            }
         }
     }
-    $visible = ($Estado -eq 'sinconexion')
-    foreach ($b in $botonesSinConexion) { $b.Visible = $visible }
+    $sinConexion = ($Estado -eq 'sinconexion')
+    foreach ($c in $controlesSinConexion) { $c.Visible = $sinConexion }
+    foreach ($c in $controlesWifi) { $c.Visible = ($sinConexion -and $hayWifi) }
+    Update-Disposicion
 }
 
-$btnConfig.Add_Click({ try { Open-ConfiguracionRed } catch { Write-Log "Error: $_" } })
-$btnWifi.Add_Click({ try { Show-RedesWifi } catch { Write-Log "Error: $_" } })
+# ---- Wi-Fi ----
+$script:proximaListaRedes = [datetime]::MinValue
+$script:ssidSeleccionado = $null
+
+function Update-ListaRedes {
+    if (-not $hayWifi) { return }
+    # No refrescar mientras se escribe la contraseña.
+    if ($txtContrasena.Text.Length -gt 0) { return }
+    try {
+        $seleccion = if ($lstRedes.SelectedItem) { $lstRedes.SelectedItem.Ssid } else { $null }
+        $redes = [WifiNativo]::Listar()
+        $lstRedes.BeginUpdate()
+        $lstRedes.Items.Clear()
+        foreach ($r in $redes) {
+            $i = $lstRedes.Items.Add($r)
+            if ($r.Ssid -eq $seleccion) { $lstRedes.SelectedIndex = $i }
+        }
+        $lstRedes.EndUpdate()
+    } catch {
+        Write-Log "Error al listar redes Wi-Fi: $_"
+    }
+}
+
+function Start-BusquedaRedes {
+    if (-not $hayWifi) { return }
+    try { [WifiNativo]::Buscar() } catch { Write-Log "Error al buscar redes Wi-Fi: $_" }
+    # Los resultados de la búsqueda tardan unos segundos.
+    $script:proximaListaRedes = (Get-Date).AddSeconds(4)
+}
+
+$lstRedes.Add_SelectedIndexChanged({
+        $red = $lstRedes.SelectedItem
+        if (-not $red -or $red.Ssid -eq $script:ssidSeleccionado) { return }
+        $script:ssidSeleccionado = $red.Ssid
+        $txtContrasena.Text = ''
+        $necesitaContrasena = $red.Segura -and -not $red.TienePerfil
+        $lblContrasena.Text = if (-not $red.Segura) { 'Red abierta (sin contraseña):' }
+        elseif ($red.TienePerfil) { 'Contraseña (déjela vacía para usar la guardada):' }
+        else { 'Contraseña de la red:' }
+        if ($necesitaContrasena) { $txtContrasena.Focus() }
+    })
+
+function Connect-RedSeleccionada {
+    $red = $lstRedes.SelectedItem
+    if (-not $red) { Show-Mensaje 'Elija una red Wi-Fi de la lista.'; return }
+    Write-Log "Conectando a la red Wi-Fi '$($red.Ssid)'."
+    $mensajeError = [WifiNativo]::Conectar($red, $txtContrasena.Text)
+    $txtContrasena.Text = ''
+    if ($mensajeError) {
+        Write-Log "Wi-Fi: $mensajeError"
+        Show-Mensaje $mensajeError
+        return
+    }
+    Show-Mensaje "Conectando a '$($red.Ssid)'... Si no conecta en unos segundos, revise la contraseña."
+    $script:proximaVerificacion = (Get-Date).AddSeconds(3)
+    $script:proximaListaRedes = (Get-Date).AddSeconds(6)
+}
+
+$btnConectar.Add_Click({ try { Connect-RedSeleccionada } catch { Write-Log "Error: $_" } })
+$txtContrasena.Add_KeyDown({
+        param($s, $e)
+        if ($e.KeyCode -eq 'Enter') { $e.SuppressKeyPress = $true; try { Connect-RedSeleccionada } catch { Write-Log "Error: $_" } }
+    })
+$lstRedes.Add_DoubleClick({ try { Connect-RedSeleccionada } catch { Write-Log "Error: $_" } })
+$btnTeclado.Add_Click({
+        try { Start-Process -FilePath "$env:SystemRoot\System32\osk.exe" } catch { Write-Log "Error al abrir el teclado: $_" }
+    })
+$btnConfig.Add_Click({ try { Open-ConfiguracionWindows } catch { Write-Log "Error: $_" } })
 $btnReintentar.Add_Click({
-        $lblEstado.Text = 'Verificando la conexión a internet...'
+        Show-Mensaje 'Verificando la conexión a internet...'
         $script:proximaVerificacion = Get-Date
+        Start-BusquedaRedes
     })
 $btnApagar.Add_Click({
         $r = [System.Windows.Forms.MessageBox]::Show($form, '¿Apagar el equipo?', $config.Titulo, 'YesNo', 'Question')
@@ -350,7 +418,7 @@ function Update-Conexion([bool]$Conectado) {
         if ($script:sinConexion) {
             Write-Log 'Conexión a internet restablecida.'
             $script:sinConexion = $false
-            Close-ConfiguracionRed
+            Close-ConfiguracionWindows
         }
         if (-not (Test-NavegadorActivo)) {
             Show-Estado 'cargando'
@@ -368,28 +436,20 @@ function Update-Conexion([bool]$Conectado) {
         Stop-Navegador
         Show-Estado 'sinconexion'
         $form.Activate()
-        Open-ConfiguracionRed
-    } elseif (-not (Test-ConfiguracionAbierta) -and
-        ((Get-Date) - $script:ultimaAperturaConfig).TotalSeconds -ge [double]$config.ReabrirConfiguracionSeg) {
-        # Si cerraron la configuración y sigue sin internet, se vuelve a abrir.
-        Open-ConfiguracionRed
+        Start-BusquedaRedes
+        $abrir = [string]$config.AbrirConfiguracionWindows
+        if ($abrir -eq 'siempre' -or ($abrir -eq 'auto' -and -not $hayWifi)) {
+            Open-ConfiguracionWindows
+        }
     }
 }
 
 function Invoke-Ciclo {
     $ahora = Get-Date
 
-    if ($script:verificarConfigEn -and $ahora -ge $script:verificarConfigEn) {
-        $script:verificarConfigEn = $null
-        if (-not (Get-ProcesoDeSesion 'SystemSettings')) {
-            Write-Log 'La app Configuración no se abrió.'
-            Open-ConexionesDeRedClasico
-        }
-    }
-
-    if ($script:mostrarRedesEn -and $ahora -ge $script:mostrarRedesEn) {
-        $script:mostrarRedesEn = $null
-        Start-Process 'ms-availablenetworks:'
+    if ($script:sinConexion -and $hayWifi -and $ahora -ge $script:proximaListaRedes) {
+        Update-ListaRedes
+        $script:proximaListaRedes = $ahora.AddSeconds(10)
     }
 
     $resultado = Get-ResultadoVerificacion
@@ -408,7 +468,6 @@ $timer.Add_Tick({
     })
 
 Show-Estado 'verificando'
-Update-Disposicion
 $timer.Start()
 
 try {
