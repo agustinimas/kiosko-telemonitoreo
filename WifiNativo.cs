@@ -1,4 +1,4 @@
-// Acceso a la API nativa de Wi-Fi de Windows (wlanapi.dll) para que el kiosko pueda
+﻿// Acceso a la API nativa de Wi-Fi de Windows (wlanapi.dll) para que el kiosko pueda
 // listar redes y conectarse sin abrir el Explorador ni la barra de tareas.
 // Compatible con el compilador de C# de Windows PowerShell 5.1.
 using System;
